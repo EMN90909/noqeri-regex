@@ -1,0 +1,23 @@
+// SPDX-License-Identifier: Apache-2.0
+module noqeri.regex
+
+extern function regexCompile(pattern: string): usize
+extern function regexIsMatch(handle: usize, input: string): bool
+extern function regexFindFirst(handle: usize, input: string): string
+extern function regexFree(handle: usize): bool
+
+export function regexPatternBounded(pattern: string): bool { return len(pattern) > 0 as usize && len(pattern) <= 8192 as usize }
+export function regexHandleValid(handle: usize): bool { return handle != 0 as usize }
+export function regexCompileChecked(pattern: string): usize {
+    if !regexPatternBounded(pattern) { return 0 as usize }
+    return regexCompile(pattern)
+}
+export function regexMatchChecked(handle: usize, input: string): bool {
+    if !regexHandleValid(handle) || len(input) > 1048576 as usize { return false }
+    return regexIsMatch(handle, input)
+}
+export function regexFindChecked(handle: usize, input: string): string {
+    if !regexMatchChecked(handle, input) { return "" }
+    return regexFindFirst(handle, input)
+}
+

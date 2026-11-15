@@ -1,0 +1,12 @@
+import "../src/regex.noqeri"
+
+function require(ok: bool): void {
+    if !ok { let invalid: *u8 = 0 as *u8 print(invalid[0]) }
+}
+
+require(regexPatternBounded("a+"))
+require(!regexPatternBounded(""))
+require(regexHandleValid(1 as usize))
+require(!regexHandleValid(0 as usize))
+print("noqeri-regex package tests: OK")
+
