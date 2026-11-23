@@ -1,23 +1,189 @@
 // SPDX-License-Identifier: Apache-2.0
 module noqeri.regex
 
-extern function regexCompile(pattern: string): usize
-extern function regexIsMatch(handle: usize, input: string): bool
-extern function regexFindFirst(handle: usize, input: string): string
-extern function regexFree(handle: usize): bool
-
-export function regexPatternBounded(pattern: string): bool { return len(pattern) > 0 as usize && len(pattern) <= 8192 as usize }
+export function regexIsMeta(c: u8): bool {
+    return c == 46 as u8 || c == 94 as u8 || c == 36 as u8 || c == 42 as u8 || c == 43 as u8 || c == 63 as u8 || c == 40 as u8 || c == 41 as u8 || c == 91 as u8 || c == 93 as u8 || c == 123 as u8 || c == 125 as u8 || c == 124 as u8 || c == 92 as u8
+}
+export function regexIsQuantifier(c: u8): bool { return c == 42 as u8 || c == 43 as u8 || c == 63 as u8 }
+export function regexPatternBounded(pattern: string): bool { return textLength(pattern) > 0 && textLength(pattern) <= 8192 }
 export function regexHandleValid(handle: usize): bool { return handle != 0 as usize }
-export function regexCompileChecked(pattern: string): usize {
-    if !regexPatternBounded(pattern) { return 0 as usize }
-    return regexCompile(pattern)
+
+function regexIsDigit(c: u8): bool { return c >= 48 as u8 && c <= 57 as u8 }
+function regexIsWord(c: u8): bool {
+    return (c >= 48 as u8 && c <= 57 as u8) || (c >= 65 as u8 && c <= 90 as u8) || (c >= 97 as u8 && c <= 122 as u8) || c == 95 as u8
 }
-export function regexMatchChecked(handle: usize, input: string): bool {
-    if !regexHandleValid(handle) || len(input) > 1048576 as usize { return false }
-    return regexIsMatch(handle, input)
-}
-export function regexFindChecked(handle: usize, input: string): string {
-    if !regexMatchChecked(handle, input) { return "" }
-    return regexFindFirst(handle, input)
+function regexIsSpace(c: u8): bool {
+    return c == 32 as u8 || c == 9 as u8 || c == 10 as u8 || c == 13 as u8
 }
 
+export function regexIsValid(pattern: []u8): bool {
+    if len(pattern) == 0 as usize || len(pattern) > 4096 as usize { return false }
+    let i: usize = 0 as usize
+    while i < len(pattern) {
+        let c: u8 = pattern[i]
+        if c == 92 as u8 {
+            if i + 1 as usize >= len(pattern) { return false }
+            i = i + 2 as usize
+        } else if c == 91 as u8 {
+            i = i + 1 as usize
+            if i < len(pattern) && pattern[i] == 94 as u8 { i = i + 1 as usize }
+            let foundEnd: bool = false
+            while i < len(pattern) {
+                if pattern[i] == 93 as u8 { foundEnd = true i = i + 1 as usize break }
+                i = i + 1 as usize
+            }
+            if !foundEnd { return false }
+        } else {
+            if regexIsQuantifier(c) && (i == 0 as usize || regexIsQuantifier(pattern[i - 1 as usize]) || pattern[i - 1 as usize] == 94 as u8) {
+                return false
+            }
+            i = i + 1 as usize
+        }
+    }
+    return true
+}
+
+function regexTokenWidth(pattern: []u8, pi: usize): usize {
+    if pi >= len(pattern) { return 0 as usize }
+    if pattern[pi] == 92 as u8 && pi + 1 as usize < len(pattern) { return 2 as usize }
+    if pattern[pi] == 91 as u8 {
+        let k: usize = pi + 1 as usize
+        if k < len(pattern) && pattern[k] == 94 as u8 { k = k + 1 as usize }
+        while k < len(pattern) {
+            if pattern[k] == 93 as u8 { return (k - pi) + 1 as usize }
+            k = k + 1 as usize
+        }
+        return 0 as usize
+    }
+    return 1 as usize
+}
+
+function regexClassMatches(pattern: []u8, start: usize, end: usize, c: u8): bool {
+    let i: usize = start + 1 as usize
+    let negate: bool = false
+    if i < end && pattern[i] == 94 as u8 { negate = true i = i + 1 as usize }
+    let matched: bool = false
+    while i + 1 as usize < end {
+        if i + 3 as usize < end && pattern[i + 1 as usize] == 45 as u8 {
+            let lo: u8 = pattern[i]
+            let hi: u8 = pattern[i + 2 as usize]
+            if c >= lo && c <= hi { matched = true }
+            i = i + 3 as usize
+        } else {
+            if c == pattern[i] { matched = true }
+            i = i + 1 as usize
+        }
+    }
+    if negate { return !matched }
+    return matched
+}
+
+function regexTokenMatches(pattern: []u8, pi: usize, width: usize, c: u8): bool {
+    if pattern[pi] == 92 as u8 {
+        let esc: u8 = pattern[pi + 1 as usize]
+        if esc == 100 as u8 { return regexIsDigit(c) }
+        if esc == 68 as u8 { return !regexIsDigit(c) }
+        if esc == 119 as u8 { return regexIsWord(c) }
+        if esc == 115 as u8 { return regexIsSpace(c) }
+        return esc == c
+    }
+    if pattern[pi] == 91 as u8 {
+        return regexClassMatches(pattern, pi, pi + width, c)
+    }
+    return pattern[pi] == 46 as u8 || pattern[pi] == c
+}
+
+record RegexState {
+    outEnd: usize
+    steps: usize
+}
+
+function regexMatchAt(pattern: []u8, pi: usize, text: []u8, ti: usize, requireEnd: bool, st: *RegexState): bool {
+    if st.steps > 65536 as usize { return false }
+    st.steps = st.steps + 1 as usize
+    if pi >= len(pattern) {
+        if requireEnd {
+            if ti == len(text) { st.outEnd = ti return true }
+            return false
+        }
+        st.outEnd = ti
+        return true
+    }
+    if pattern[pi] == 36 as u8 && pi + 1 as usize == len(pattern) {
+        if ti == len(text) { st.outEnd = ti return true }
+        return false
+    }
+    let width: usize = regexTokenWidth(pattern, pi)
+    if width == 0 as usize { return false }
+    let next: usize = pi + width
+    let q: u8 = 0 as u8
+    if next < len(pattern) { q = pattern[next] }
+
+    if q == 42 as u8 {
+        let cursor: usize = ti
+        while cursor < len(text) && regexTokenMatches(pattern, pi, width, text[cursor]) {
+            cursor = cursor + 1 as usize
+        }
+        while cursor >= ti {
+            if regexMatchAt(pattern, next + 1 as usize, text, cursor, requireEnd, st) { return true }
+            if cursor == ti { return false }
+            cursor = cursor - 1 as usize
+        }
+        return false
+    }
+    if q == 43 as u8 {
+        if ti >= len(text) || !regexTokenMatches(pattern, pi, width, text[ti]) { return false }
+        let cursor: usize = ti + 1 as usize
+        while cursor < len(text) && regexTokenMatches(pattern, pi, width, text[cursor]) {
+            cursor = cursor + 1 as usize
+        }
+        while cursor > ti {
+            if regexMatchAt(pattern, next + 1 as usize, text, cursor, requireEnd, st) { return true }
+            cursor = cursor - 1 as usize
+        }
+        return false
+    }
+    if q == 63 as u8 {
+        if ti < len(text) && regexTokenMatches(pattern, pi, width, text[ti]) {
+            if regexMatchAt(pattern, next + 1 as usize, text, ti + 1 as usize, requireEnd, st) { return true }
+        }
+        return regexMatchAt(pattern, next + 1 as usize, text, ti, requireEnd, st)
+    }
+    if ti >= len(text) || !regexTokenMatches(pattern, pi, width, text[ti]) { return false }
+    return regexMatchAt(pattern, next, text, ti + 1 as usize, requireEnd, st)
+}
+
+export function regexFullMatchBytes(pattern: []u8, text: []u8): bool {
+    if !regexIsValid(pattern) { return false }
+    let start: usize = 0 as usize
+    if pattern[0 as usize] == 94 as u8 { start = 1 as usize }
+    let st: RegexState
+    st.outEnd = 0 as usize
+    st.steps = 0 as usize
+    return regexMatchAt(pattern, start, text, 0 as usize, true, &st)
+}
+
+export function regexSearchBytes(pattern: []u8, text: []u8, outStart: *usize, outEnd: *usize): bool {
+    if !regexIsValid(pattern) { return false }
+    let st: RegexState
+    st.outEnd = 0 as usize
+    st.steps = 0 as usize
+    if pattern[0 as usize] == 94 as u8 {
+        if regexMatchAt(pattern, 1 as usize, text, 0 as usize, false, &st) {
+            outStart[0 as usize] = 0 as usize
+            outEnd[0 as usize] = st.outEnd
+            return true
+        }
+        return false
+    }
+    let i: usize = 0 as usize
+    while i <= len(text) {
+        if regexMatchAt(pattern, 0 as usize, text, i, false, &st) {
+            outStart[0 as usize] = i
+            outEnd[0 as usize] = st.outEnd
+            return true
+        }
+        i = i + 1 as usize
+    }
+    return false
+}

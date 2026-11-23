@@ -1,12 +1,36 @@
+// SPDX-License-Identifier: Apache-2.0
 import "../src/regex.noqeri"
 
 function require(ok: bool): void {
     if !ok { let invalid: *u8 = 0 as *u8 print(invalid[0]) }
 }
 
-require(regexPatternBounded("a+"))
-require(!regexPatternBounded(""))
-require(regexHandleValid(1 as usize))
-require(!regexHandleValid(0 as usize))
-print("noqeri-regex package tests: OK")
+function test_regex(): int {
+    require(regexPatternBounded("^[a-z]+$"))
+    // pattern: ^[a-z]+\d+$  ("[a-z]+\d+")
+    let pat: [u8; 10]
+    pat[0] = 94 as u8 pat[1] = 91 as u8 pat[2] = 97 as u8 pat[3] = 45 as u8 pat[4] = 122 as u8 pat[5] = 93 as u8
+    pat[6] = 43 as u8 pat[7] = 92 as u8 pat[8] = 100 as u8 pat[9] = 43 as u8
 
+    let txt: [u8; 6]
+    txt[0] = 110 as u8 txt[1] = 113 as u8 txt[2] = 49 as u8 txt[3] = 50 as u8 txt[4] = 51 as u8 txt[5] = 120 as u8 // "nq123x"
+    let patSlice: []u8 = slice(&pat[0 as usize], 10 as usize)
+    let txtSlice: []u8 = slice(&txt[0 as usize], 6 as usize)
+
+    require(!regexFullMatchBytes(patSlice, txtSlice))
+    require(regexFullMatchBytes(patSlice, slice(&txt[0 as usize], 5 as usize))) // "nq123"
+
+    let s: usize = 0 as usize
+    let e: usize = 0 as usize
+    require(regexSearchBytes(patSlice, txtSlice, &s, &e))
+    require(s == 0 as usize && e == 5 as usize)
+
+    // Invalid unclosed class must fail cleanly
+    let bad: [u8; 3]
+    bad[0] = 91 as u8 bad[1] = 97 as u8 bad[2] = 98 as u8
+    require(!regexIsValid(slice(&bad[0 as usize], 3 as usize)))
+    return 1
+}
+
+require(test_regex() == 1)
+print("noqeri-regex package tests: OK")
